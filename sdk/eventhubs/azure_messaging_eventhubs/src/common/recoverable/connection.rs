@@ -75,6 +75,7 @@ pub(crate) struct RecoverableConnection {
     custom_endpoint: Option<Url>,
     connections: AsyncMutex<Option<Arc<AmqpConnection>>>,
     mgmt_client: AsyncMutex<Option<Arc<AmqpManagement>>>,
+    cbs_client: AsyncMutex<Option<Arc<AmqpClaimsBasedSecurity>>>,
     session_instances: AsyncMutex<HashMap<Url, Arc<AmqpSession>>>,
     receiver_instances: AsyncMutex<HashMap<Url, Arc<AmqpReceiver>>>,
     sender_instances: AsyncMutex<HashMap<Url, Arc<AmqpSender>>>,
@@ -115,6 +116,7 @@ impl RecoverableConnection {
                 sender_instances: AsyncMutex::new(HashMap::new()),
                 receiver_instances: AsyncMutex::new(HashMap::new()),
                 mgmt_client: AsyncMutex::new(None),
+                cbs_client: AsyncMutex::new(None),
                 authorizer,
                 #[cfg(test)]
                 forced_error: Mutex::new(None),
@@ -337,12 +339,18 @@ impl RecoverableConnection {
         );
         let _enter = span.enter();
 
+        let mut cbs_guard = self.cbs_client.lock().await;
+        if let Some(cached) = cbs_guard.as_ref() {
+            return Ok(cached.clone());
+        }
+
         let connection = self.ensure_connection().await?;
         let cbs_client = RecoverableClaimsBasedSecurity::create_claims_based_security(
             connection.clone(),
             &self.retry_options,
         )
         .await?;
+        *cbs_guard = Some(cbs_client.clone());
         Ok(cbs_client)
     }
 
@@ -433,6 +441,8 @@ impl RecoverableConnection {
                 connection.session_instances.lock().await.clear();
                 connection.sender_instances.lock().await.clear();
                 connection.receiver_instances.lock().await.clear();
+                connection.mgmt_client.lock().await.take();
+                connection.cbs_client.lock().await.take();
             }
             ErrorRecoveryAction::ReconnectSession => {
                 debug!("Recovering from session error: {:?}", reason);
@@ -440,6 +450,7 @@ impl RecoverableConnection {
                 connection.session_instances.lock().await.clear();
                 connection.sender_instances.lock().await.clear();
                 connection.receiver_instances.lock().await.clear();
+                connection.cbs_client.lock().await.take();
             }
             ErrorRecoveryAction::ReconnectLink => {
                 debug!("Recovering from link error: {:?}", reason);
@@ -448,6 +459,7 @@ impl RecoverableConnection {
                 connection.sender_instances.lock().await.clear();
                 connection.receiver_instances.lock().await.clear();
                 connection.mgmt_client.lock().await.take();
+                connection.cbs_client.lock().await.take();
             }
             _ => {
                 warn!("Recover action {reason:?} should already have been handled.");
