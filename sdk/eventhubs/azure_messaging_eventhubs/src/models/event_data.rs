@@ -83,10 +83,23 @@ impl EventData {
 
         // If the AMQP message body is a single binary value, copy it to
         // the event data body.
-        if let AmqpMessageBody::Binary(binary) = message.body() {
-            if binary.len() == 1 {
-                event_data_builder = event_data_builder.with_body(binary[0].clone());
+        match message.body() {
+            AmqpMessageBody::Binary(binary) if !binary.is_empty() => {
+                if binary.len() == 1 {
+                    event_data_builder = event_data_builder.with_body(binary[0].clone());
+                } else {
+                    let total_len: usize = binary.iter().map(|chunk| chunk.len()).sum();
+                    let mut joined = Vec::with_capacity(total_len);
+                    for chunk in binary.iter() {
+                        joined.extend_from_slice(chunk);
+                    }
+                    event_data_builder = event_data_builder.with_body(joined);
+                }
             }
+            AmqpMessageBody::Value(AmqpValue::Binary(bytes)) => {
+                event_data_builder = event_data_builder.with_body(bytes.clone());
+            }
+            _ => {}
         }
 
         if let Some(properties) = message.properties() {
@@ -497,5 +510,15 @@ mod tests {
         assert_eq!(event_data.correlation_id(), Some(&correlation_id));
         assert_eq!(event_data.message_id(), Some(&message_id));
         assert_eq!(event_data.properties().unwrap().get(&key), Some(&value));
+    }
+
+    #[test]
+    fn event_data_from_message_flattens_multi_segment_binary_body() {
+        let message = AmqpMessage::builder()
+            .with_body(vec![vec![1, 2], vec![3, 4, 5]])
+            .build();
+
+        let event_data = EventData::from_message(&message);
+        assert_eq!(event_data.body(), Some(&[1, 2, 3, 4, 5][..]));
     }
 }
